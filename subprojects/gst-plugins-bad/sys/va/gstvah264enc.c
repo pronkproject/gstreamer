@@ -2125,8 +2125,8 @@ _fill_sps (GstVaH264Enc * self, VAEncSequenceParameterBufferH264 * seq_param)
 
   /* seq_scaling_matrix_present_flag not supported now */
   g_assert (seq_param->seq_fields.bits.seq_scaling_matrix_present_flag == 0);
-  /* pic_order_cnt_type only support 0 now */
-  g_assert (seq_param->seq_fields.bits.pic_order_cnt_type == 0);
+  g_assert (seq_param->seq_fields.bits.pic_order_cnt_type == 0 ||
+      seq_param->seq_fields.bits.pic_order_cnt_type == 2);
   /* only progressive frames encoding is supported now */
   g_assert (seq_param->seq_fields.bits.frame_mbs_only_flag);
 
@@ -2281,7 +2281,8 @@ _fill_sequence_param (GstVaH264Enc * self,
       .seq_scaling_matrix_present_flag = FALSE,
       .direct_8x8_inference_flag = direct_8x8_inference_flag,
       .log2_max_frame_num_minus4 = self->gop.log2_max_frame_num - 4,
-      .pic_order_cnt_type = 0,
+      .pic_order_cnt_type = self->gop.num_bframes == 0 &&
+          self->gop.num_ref_frames > 0 ? 2 : 0,
       .log2_max_pic_order_cnt_lsb_minus4 = self->gop.log2_max_pic_order_cnt - 4,
     },
     .bit_depth_luma_minus8 = 0,
@@ -2766,7 +2767,7 @@ _add_slice_header (GstVaH264Enc * self, GstVaH264EncFrame * frame,
     .field_pic_flag = 0,
     .bottom_field_flag = 0,
     .idr_pic_id = (frame->frame_num == 0 ? slice->idr_pic_id : 0),
-    /* only pic_order_cnt_type 1 is supported now. */
+    /* Written only when the SPS selects picture-order-count type 0. */
     .pic_order_cnt_lsb = slice->pic_order_cnt_lsb,
     .delta_pic_order_cnt_bottom = slice->delta_pic_order_cnt_bottom,
      /* Only for B frame. */
