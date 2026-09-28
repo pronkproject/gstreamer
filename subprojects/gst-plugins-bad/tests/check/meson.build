@@ -185,6 +185,7 @@ endif
 if host_machine.system() == 'linux'
   base_tests += [
     [['elements/vapostproc.c'], not gstva_dep.found(), [gstva_dep]],
+    [['elements/vah264enc.c'], not gstva_dep.found(), [gstva_dep, gstcodecparsers_dep]],
     [['elements/vacompositor.c'], not gstva_dep.found(), [gstva_dep]],
   ]
 endif

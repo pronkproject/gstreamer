@@ -1,0 +1,140 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+
+#include <gst/check/gstcheck.h>
+#include <gst/check/gstharness.h>
+#include <gst/codecparsers/gsth264parser.h>
+
+static void
+check_picture_order (guint references, guint bframes, guint expected_type,
+    const gchar * profile)
+{
+  GstHarness *h;
+  GstH264NalParser *parser = gst_h264_nal_parser_new ();
+  guint frame_count = 0, sps_count = 0, bframe_count = 0;
+  const guint frames = 95;
+  gchar *pipeline;
+
+  pipeline = g_strdup_printf ("vah264enc ref-frames=%u b-frames=%u "
+      "key-int-max=30 cabac=%s dct8x8=%s ! capsfilter caps=\"video/x-h264, "
+      "stream-format=byte-stream, alignment=au, profile=%s\"",
+      references, bframes, g_str_equal (profile, "high") ? "true" : "false",
+      g_str_equal (profile, "high") ? "true" : "false", profile);
+  h = gst_harness_new_parse (pipeline);
+  g_free (pipeline);
+  gst_harness_set_src_caps_str (h, "video/x-raw, format=NV12, "
+      "width=320, height=240, framerate=30/1");
+  gst_harness_play (h);
+
+  for (guint i = 0; i < frames; i++) {
+    GstBuffer *buffer = gst_buffer_new_allocate (NULL, 320 * 240 * 3 / 2, NULL);
+    GstMapInfo map;
+
+    fail_unless (gst_buffer_map (buffer, &map, GST_MAP_WRITE));
+    memset (map.data, i, 320 * 240);
+    memset (map.data + 320 * 240, 128, 320 * 240 / 2);
+    gst_buffer_unmap (buffer, &map);
+    GST_BUFFER_PTS (buffer) = gst_util_uint64_scale (i, GST_SECOND, 30);
+    GST_BUFFER_DURATION (buffer) = gst_util_uint64_scale (1, GST_SECOND, 30);
+    fail_unless_equals_int (gst_harness_push (h, buffer), GST_FLOW_OK);
+  }
+  fail_unless (gst_harness_push_event (h, gst_event_new_eos ()));
+
+  while (gst_harness_buffers_in_queue (h)) {
+    GstBuffer *buffer = gst_harness_pull (h);
+    GstMapInfo map;
+    guint offset = 0;
+    gboolean has_picture = FALSE;
+
+    fail_unless (gst_buffer_map (buffer, &map, GST_MAP_READ));
+    while (offset < map.size) {
+      GstH264NalUnit nalu;
+      GstH264ParserResult result = gst_h264_parser_identify_nalu (parser,
+          map.data, offset, map.size, &nalu);
+
+      if (result == GST_H264_PARSER_NO_NAL) {
+        for (guint i = offset; i < map.size; i++)
+          fail_unless_equals_int (map.data[i], 0);
+        break;
+      }
+      fail_unless (result == GST_H264_PARSER_OK ||
+          result == GST_H264_PARSER_NO_NAL_END,
+          "NAL result %d at offset %u of %zu", result, offset, map.size);
+      fail_unless_equals_int (gst_h264_parser_parse_nal (parser, &nalu),
+          GST_H264_PARSER_OK);
+      if (nalu.type == GST_H264_NAL_SPS) {
+        fail_unless (parser->last_sps != NULL);
+        fail_unless_equals_int (parser->last_sps->pic_order_cnt_type,
+            expected_type);
+        fail_unless_equals_int (parser->last_sps->profile_idc,
+            g_str_equal (profile, "high") ? 100 : 66);
+        sps_count++;
+      } else if (nalu.type == GST_H264_NAL_SLICE ||
+          nalu.type == GST_H264_NAL_SLICE_IDR) {
+        GstH264SliceHdr slice;
+
+        fail_unless_equals_int (gst_h264_parser_parse_slice_hdr (parser,
+                &nalu, &slice, FALSE, FALSE), GST_H264_PARSER_OK);
+        fail_unless_equals_int (slice.pps->sequence->pic_order_cnt_type,
+            expected_type);
+        if (GST_H264_IS_B_SLICE (&slice))
+          bframe_count++;
+        if (expected_type == 2) {
+          fail_unless (!GST_H264_IS_B_SLICE (&slice));
+          fail_unless (nalu.ref_idc != 0);
+        }
+        has_picture = TRUE;
+      }
+      offset = nalu.offset + nalu.size;
+    }
+    if (has_picture)
+      frame_count++;
+    gst_buffer_unmap (buffer, &map);
+    gst_buffer_unref (buffer);
+  }
+
+  fail_unless_equals_int (frame_count, frames);
+  fail_unless (sps_count >= 4);
+  if (bframes)
+    fail_unless (bframe_count > 0);
+  gst_h264_nal_parser_free (parser);
+  gst_harness_teardown (h);
+}
+
+GST_START_TEST (picture_order_without_bframes)
+{
+  check_picture_order (1, 0, 2, "constrained-baseline");
+  check_picture_order (3, 0, 2, "constrained-baseline");
+  check_picture_order (1, 0, 2, "high");
+  check_picture_order (3, 0, 2, "high");
+}
+GST_END_TEST;
+
+GST_START_TEST (picture_order_with_bframes)
+{
+  check_picture_order (3, 2, 0, "high");
+}
+GST_END_TEST;
+
+int
+main (int argc, char **argv)
+{
+  GstElement *encoder;
+  Suite *suite;
+  TCase *test_case;
+
+  gst_check_init (&argc, &argv);
+  encoder = gst_element_factory_make ("vah264enc", NULL);
+  if (!encoder) {
+    g_print ("SKIP: no VA H.264 encoder is registered\n");
+    return EXIT_SUCCESS;
+  }
+  gst_object_unref (encoder);
+
+  suite = suite_create ("vah264enc");
+  test_case = tcase_create ("picture order");
+  tcase_set_timeout (test_case, 30);
+  tcase_add_test (test_case, picture_order_without_bframes);
+  tcase_add_test (test_case, picture_order_with_bframes);
+  suite_add_tcase (suite, test_case);
+  return gst_check_run_suite (suite, "vah264enc", __FILE__);
+}
